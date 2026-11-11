@@ -55,8 +55,9 @@ export function SearchableSelect({
   const [query, setQuery] = useState("");
   const selected = options.find((o) => o.value === value);
   const trimmed = query.trim();
-  // Hidden (search-only) options still count here, so "Add new" is never
-  // offered for a name that already exists — typing it shows the existing one.
+  // Search-only options still count here, so "Add new" is never offered for
+  // a name that already exists — typing it shows the existing one. A hidden
+  // (deleted) option does not: adding its name brings that record back.
   const canCreate = !!onCreate && trimmed.length > 0 &&
     !options.some((o) => !o.hidden && norm(o.matchText ?? o.label) === norm(trimmed));
   const offered = options.filter((o) => !o.hidden || o.value === value);
