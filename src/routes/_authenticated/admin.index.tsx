@@ -6,7 +6,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { money, localToday, localDateOf } from "@/lib/format";
 import { methodLabel } from "@/lib/payments";
 import { normalizeProductName } from "@/lib/pricing";
-import { isTracked, oversold, stockOf } from "@/lib/stock";
+import { activeProducts, isTracked, oversold, stockOf } from "@/lib/stock";
 import { loadMonthPnL, monthLabel, type MonthPnL } from "@/lib/finance";
 import { useLiveReload, type LiveStatus } from "@/lib/useLiveReload";
 import { fetchAll } from "@/lib/fetchAll";
@@ -118,7 +118,7 @@ const isBackfill = (a: { reason: string | null; note: string | null }) =>
 
 type Prod = {
   id: string; product_name: string | null; quantity_in_stock: number | null; track_stock: boolean | null;
-  purchase_price: number | null; category_id: string | null;
+  purchase_price: number | null; category_id: string | null; deleted_at: string | null;
 };
 type SaleLine = {
   id: string; product_id: string | null; product_name: string | null;
@@ -182,7 +182,7 @@ async function loadDashboard(quiet: boolean): Promise<{ data: Dash; ok: boolean 
 
   const [prodR, invR, expR, catR, payR, ledR, spR, adjR, retR, tplR, empR, merR, cliR] = await Promise.all([
     fetchAll((a, b) => supabase.from("products")
-      .select("id, product_name, quantity_in_stock, track_stock, purchase_price, category_id")
+      .select("id, product_name, quantity_in_stock, track_stock, purchase_price, category_id, deleted_at")
       .order("id").range(a, b), 1000, opt),
     // Every bill of the last 12 months with its lines: sales per day and
     // month (as finance.ts counts them), units out, top sellers.
@@ -227,7 +227,10 @@ async function loadDashboard(quiet: boolean): Promise<{ data: Dash; ok: boolean 
   ]);
   const ok = [prodR, invR, expR, catR, payR, ledR, spR, adjR, retR, tplR, empR, merR, cliR].every((r) => !r.error);
 
-  const products = (prodR.data ?? []) as unknown as Prod[];
+  const allProducts = (prodR.data ?? []) as unknown as Prod[];
+  // Stock figures cover the products the shop still carries; a deleted one
+  // (Products → Delete) keeps only its name, for old sales.
+  const products = activeProducts(allProducts);
   const invoices = (invR.data ?? []) as unknown as Inv[];
   const expenses = (expR.data ?? []) as unknown as Expense[];
   const purchases = (spR.data ?? []) as unknown as Purchase[];
@@ -236,7 +239,7 @@ async function loadDashboard(quiet: boolean): Promise<{ data: Dash; ok: boolean 
   const cats = (catR.data ?? []) as { id: string; name: string }[];
 
   const trackedIds = new Set(products.filter(isTracked).map((p) => p.id));
-  const nameOf = new Map(products.map((p) => [p.id, p.product_name]));
+  const nameOf = new Map(allProducts.map((p) => [p.id, p.product_name]));
 
   // --- Sales and units out, from invoices -------------------------------
   const salesByDay = new Map<string, number>();

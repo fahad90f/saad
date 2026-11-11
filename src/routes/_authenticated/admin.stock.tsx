@@ -62,7 +62,9 @@ function StockAdmin() {
   const createProduct = async (uid: string, name: string) => {
     const { product, created, error } = await getOrCreateProduct(name);
     if (error || !product) return toast.error(error ?? "Could not add product");
-    setProducts((ps) => (ps.some((p) => p.id === product.id) ? ps : [...ps, product]));
+    // A deleted product of this name comes back restored: refresh its row.
+    setProducts((ps) => (ps.some((p) => p.id === product.id)
+      ? ps.map((p) => (p.id === product.id ? { ...p, ...product } : p)) : [...ps, product]));
     if (created) {
       // A brand-new product has no price yet — clear any price left over from
       // the product previously chosen on this line.

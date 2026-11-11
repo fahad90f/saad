@@ -24,6 +24,7 @@ function CategoryPage() {
       if (c) {
         const { data: p } = await supabase.from("products").select("*").eq("category_id", c.id)
           .eq("track_stock", true).gt("quantity_in_stock", 0).gt("selling_price", 0)
+          .is("deleted_at", null)
           .order("product_name");
         setProducts((p ?? []).filter(showable));
       }

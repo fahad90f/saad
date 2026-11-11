@@ -38,20 +38,35 @@ export const stockLabel = (p: StockFields) =>
 export const hiddenFromBrowse = (p: StockFields) => isTracked(p) && stockOf(p) <= 0;
 
 /**
+ * Deleted on the Products page. A product with sales or purchase history is
+ * never erased (its old invoices, purchases and reports still show it); it
+ * is marked deleted instead and left out of every product list, picker,
+ * stock figure and the website. Restored from Products → Deleted products,
+ * by entering its name again, or by booking a purchase of it.
+ */
+export const isDeleted = (p: { deleted_at?: string | null }) => !!p.deleted_at;
+
+/** The products the shop still carries (not deleted). */
+export const activeProducts = <T extends { deleted_at?: string | null }>(list: T[]) =>
+  list.filter((p) => !isDeleted(p));
+
+/**
  * Option for a SearchableSelect product picker. Products hidden from browse
  * (see hiddenFromBrowse) are search-only: out of the list until a name is
  * typed. `hideUntracked` makes services/trade-ins search-only too — noise in
- * the purchase picker, where they are never booked in.
+ * the purchase picker, where they are never booked in. Deleted products are
+ * hidden: never offered, only shown as the current choice of an old record.
  */
 export function productOption(
-  p: StockFields & { id: string; product_name: string | null },
+  p: StockFields & { id: string; product_name: string | null; deleted_at?: string | null },
   hint?: string,
   { hideUntracked = false }: { hideUntracked?: boolean } = {},
-): { value: string; label: string; hint: string; searchOnly: boolean } {
+): { value: string; label: string; hint: string; searchOnly: boolean; hidden: boolean } {
   return {
     value: p.id,
     label: p.product_name ?? "—",
-    hint: hint ? `${hint} · ${stockLabel(p)}` : stockLabel(p),
+    hint: isDeleted(p) ? "Deleted" : hint ? `${hint} · ${stockLabel(p)}` : stockLabel(p),
     searchOnly: hiddenFromBrowse(p) || (hideUntracked && !isTracked(p)),
+    hidden: isDeleted(p),
   };
 }

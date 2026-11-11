@@ -755,6 +755,7 @@ export type Database = {
           category_id: string | null
           created_at: string
           deal_end_date: string | null
+          deleted_at: string | null
           description: string | null
           id: string
           image_url: string | null
@@ -773,6 +774,7 @@ export type Database = {
           category_id?: string | null
           created_at?: string
           deal_end_date?: string | null
+          deleted_at?: string | null
           description?: string | null
           id?: string
           image_url?: string | null
@@ -791,6 +793,7 @@ export type Database = {
           category_id?: string | null
           created_at?: string
           deal_end_date?: string | null
+          deleted_at?: string | null
           description?: string | null
           id?: string
           image_url?: string | null

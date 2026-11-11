@@ -2,11 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { supabase } from "@/integrations/supabase/client";
-import { money, localDateOf } from "@/lib/format";
+import { money, localDateOf, shortDate } from "@/lib/format";
 import { inStockFirst, normalizeProductName } from "@/lib/pricing";
-import { hiddenFromBrowse, isTracked, stockOf } from "@/lib/stock";
+import { hiddenFromBrowse, isDeleted, isTracked, stockOf } from "@/lib/stock";
 import { matchesQuery } from "@/lib/search";
-import { findProductByName, type ProductRow } from "@/lib/products";
+import { findProductByName, restoreProduct, type ProductRow } from "@/lib/products";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { SearchableSelect } from "@/components/admin/SearchableSelect";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search, X } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, X, Undo2 } from "lucide-react";
 import { ImageUpload } from "@/components/admin/ImageUpload";
 import { fetchAll } from "@/lib/fetchAll";
 
@@ -57,6 +57,9 @@ function ProductsAdmin() {
   // Browsing hides sold-out products (like the POS); a typed search always
   // finds them, so re-entering one opens the existing record.
   const [showOutOfStock, setShowOutOfStock] = useState(false);
+  // Deleted products (kept for their sales/purchase records) are listed
+  // only here, each with Restore.
+  const [showDeleted, setShowDeleted] = useState(false);
   const [saving, setSaving] = useState(false);
   // Create: units on the shelf right now (booked as an "Opening count").
   const [openingStock, setOpeningStock] = useState("");
@@ -95,16 +98,34 @@ function ProductsAdmin() {
   // Sold-out products (hiddenFromBrowse) are left out while browsing unless
   // the toggle is on; a typed search always includes them, listed last
   // (rows are already in-stock first). Untracked services always show.
-  const hiddenCount = useMemo(() => rows.filter(hiddenFromBrowse).length, [rows]);
+  // Deleted products appear only in the "Deleted products" view.
+  const active = useMemo(() => rows.filter((r) => !isDeleted(r)), [rows]);
+  const deleted = useMemo(() => rows.filter(isDeleted)
+    .sort((a, b) => (b.deleted_at ?? "").localeCompare(a.deleted_at ?? "")), [rows]);
+  const hiddenCount = useMemo(() => active.filter(hiddenFromBrowse).length, [active]);
+  const term = q.trim();
+  const matches = (r: any) => matchesQuery(`${r.product_name ?? ""} ${r.categories?.name ?? ""} ${r.brands?.name ?? ""}`, term);
   const visible = useMemo(() => {
-    const term = q.trim();
-    if (term) return rows.filter((r) => matchesQuery(`${r.product_name ?? ""} ${r.categories?.name ?? ""} ${r.brands?.name ?? ""}`, term));
-    return showOutOfStock ? rows : rows.filter((r) => !hiddenFromBrowse(r));
-  }, [rows, q, showOutOfStock]);
-  const visibleOut = q.trim() ? visible.filter(hiddenFromBrowse).length : 0;
+    if (showDeleted) return term ? deleted.filter(matches) : deleted;
+    if (term) return active.filter(matches);
+    return showOutOfStock ? active : active.filter((r) => !hiddenFromBrowse(r));
+  }, [active, deleted, term, showOutOfStock, showDeleted]);
+  const visibleOut = term && !showDeleted ? visible.filter(hiddenFromBrowse).length : 0;
+  const deletedMatches = term && !showDeleted ? deleted.filter(matches).length : 0;
 
-  // A product that already exists is opened instead of being entered twice.
-  const openExisting = (p: ProductRow) => {
+  // A product that already exists is opened instead of being entered twice;
+  // a deleted one is brought back first.
+  const openExisting = async (p: ProductRow) => {
+    if (isDeleted(p)) {
+      const { product, error } = await restoreProduct(p.id);
+      if (error || !product) return toast.error(`"${p.product_name}" was deleted and could not be restored: ${error}`);
+      toast.info(`"${p.product_name}" was deleted — restored it and opened it`, {
+        description: "Its old sales and purchases are back with it. Fix its price or stock here and save.",
+        duration: 8000,
+      });
+      load();
+      return edit(product);
+    }
     toast.info(`"${p.product_name}" already exists — opened it`, {
       description: "Fix its price or enter a counted stock here and save. New arrivals are booked on Stock Purchases.",
       duration: 8000,
@@ -152,7 +173,9 @@ function ProductsAdmin() {
       if (normalizeProductName(name) !== normalizeProductName(editingName)) {
         const clash = await findProductByName(name).catch(() => null);
         if (clash && clash.id !== editing) {
-          return toast.error(`"${clash.product_name}" already exists — use that product, or choose a different name`);
+          return toast.error(isDeleted(clash)
+            ? `"${clash.product_name}" is a deleted product — restore it from Deleted products, or choose a different name`
+            : `"${clash.product_name}" already exists — use that product, or choose a different name`);
         }
       }
       const { data, error } = await supabase.from("products").update(payload).eq("id", editing).select("id").maybeSingle();
@@ -193,6 +216,13 @@ function ProductsAdmin() {
         return toast.error(describe(error));
       }
       if (!data) return toast.error("Could not create product");
+      // Right after adding: keep it, or delete it if it was a mistake.
+      const keepOrDelete = (title: string) => toast.success(title, {
+        description: `"${name}" — keep it, or delete it if it was added by mistake.`,
+        duration: 15000,
+        action: { label: "Delete", onClick: () => { remove({ ...payload, id: data.id }, { ask: false }); } },
+        cancel: { label: "Keep", onClick: () => {} },
+      });
       if (opening > 0) {
         const { error: adjErr } = await supabase.from("stock_adjustments").insert({
           product_id: data.id, delta: opening, reason: "Opening count", note: "Entered on the Products page",
@@ -200,20 +230,21 @@ function ProductsAdmin() {
         // The product now exists, so a retry would hit the duplicate-name
         // check — close, and point at the edit dialog for the count.
         if (adjErr) toast.error(`Product created, but its opening stock was not saved — edit it and adjust the stock: ${adjErr.message}`);
-        else toast.success(`Product created with ${opening} in stock`);
+        else keepOrDelete(`Product created with ${opening} in stock`);
       } else {
-        toast.success("Product created");
+        keepOrDelete("Product created");
       }
     }
     setOpen(false); startNew(); load();
   };
 
-  // A product with sales or purchase history is kept for the records (its
-  // sale lines, purchases and sales history would lose their product): it
-  // stays hidden while out of stock and comes back when restocked. One with
-  // no history at all can go. The database refuses the first kind too
-  // (products_keep_history) — its message is shown if it ever has to.
-  const remove = async (r: any) => {
+  // Delete works for every product. One with no history at all is erased.
+  // One with sales, purchases, quotations or amanat is marked deleted: its
+  // old invoices, purchases, ledgers and reports keep showing it (erasing it
+  // would blank the product on those rows, which the database refuses —
+  // products_keep_history), but it leaves this list, the POS, every picker,
+  // the stock figures and the website. Restore brings it back.
+  const remove = async (r: any, { ask = true }: { ask?: boolean } = {}) => {
     const id: string = r.id;
     const name: string = r.product_name ?? "This product";
     const head = { count: "exact" as const, head: true };
@@ -228,23 +259,54 @@ function ProductsAdmin() {
     // Sale lines and sales-history rows record the same sales.
     const sales = Math.max(n(ii), n(cp));
     const purchases = n(sp), quotes = n(qi), amanat = n(ai);
-    if (sales + purchases + quotes + amanat > 0) {
-      const plural = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
-      const parts = [
-        sales > 0 && plural(sales, "sale"),
-        purchases > 0 && plural(purchases, "purchase"),
-        quotes > 0 && plural(quotes, "quotation"),
-        amanat > 0 && plural(amanat, "amanat entry", "amanat entries"),
-      ].filter(Boolean).join(" / ");
-      return toast.error(`"${name}" has ${parts} — kept for the records; it is hidden while out of stock and comes back when restocked.`, { duration: 8000 });
-    }
     const units = isTracked(r) ? stockOf(r) : 0;
-    if (!confirm(units > 0
-      ? `Delete "${name}"? It has no sales or purchases; its stock count (${units}) is deleted with it.`
-      : `Delete "${name}"? It has no sales or purchase history.`)) return;
-    const { error } = await supabase.from("products").delete().eq("id", id);
-    if (error) return toast.error(error.message, { duration: 8000 });
-    toast.success("Deleted"); load();
+    const plural = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+    const parts = [
+      sales > 0 && plural(sales, "sale"),
+      purchases > 0 && plural(purchases, "purchase"),
+      quotes > 0 && plural(quotes, "quotation"),
+      amanat > 0 && plural(amanat, "amanat entry", "amanat entries"),
+    ].filter(Boolean).join(", ");
+
+    const markDeleted = async () => {
+      const { error } = await supabase.from("products").update({ deleted_at: new Date().toISOString() }).eq("id", id);
+      if (error) return false;
+      toast.success(`"${name}" deleted`, {
+        description: "Its sales and purchase records are kept. Restore it any time from Deleted products.",
+        duration: 10000,
+        action: { label: "Undo", onClick: () => { restore(r); } },
+      });
+      return true;
+    };
+
+    if (parts) {
+      if (ask && !confirm(
+        `Delete "${name}"?\n\nIt has ${parts}. Those records keep it: old invoices, purchases, ledgers and reports still show it.\n\n`
+        + `It leaves the product list, POS, product pickers, stock figures and the website`
+        + `${units > 0 ? ` — including the ${units} still counted in stock` : ""}.\n\nYou can restore it any time from "Deleted products".`)) return;
+      if (!(await markDeleted())) return toast.error(`Could not delete "${name}" — check the connection and try again`);
+    } else {
+      if (ask && !confirm(units > 0
+        ? `Delete "${name}" permanently? It has no sales or purchases; its stock count (${units}) is deleted with it.`
+        : `Delete "${name}" permanently? It has no sales or purchase history.`)) return;
+      const { error } = await supabase.from("products").delete().eq("id", id);
+      if (error) {
+        // History the counts above missed (e.g. a sale made just now): keep
+        // the records and mark it deleted instead.
+        if (error.code !== "P0001" || !(await markDeleted())) return toast.error(error.message, { duration: 8000 });
+      } else {
+        toast.success(`"${name}" deleted`);
+      }
+    }
+    if (editing === id) { setOpen(false); startNew(); }
+    load();
+  };
+
+  const restore = async (r: any) => {
+    const { error } = await restoreProduct(r.id);
+    if (error) return toast.error(`Could not restore "${r.product_name}": ${error}`);
+    toast.success(`"${r.product_name}" restored`, { description: "It is back in the product list, POS and pickers." });
+    load();
   };
 
   // Only the editable columns go into the form — never the embedded
@@ -406,24 +468,40 @@ function ProductsAdmin() {
               )}
               <Field label="Description" full><Textarea value={form.description ?? ""} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
             </div>
-            <Button className="w-full mt-2" onClick={save} disabled={saving}>{saving ? "Saving..." : "Save"}</Button>
+            <div className="flex gap-2 mt-2">
+              {editing && (
+                <Button variant="outline" className="shrink-0 text-destructive hover:text-destructive" disabled={saving}
+                        onClick={() => { const r = rows.find((x) => x.id === editing); if (r) remove(r); }}>
+                  <Trash2 className="h-4 w-4 mr-1.5" /> Delete
+                </Button>
+              )}
+              <Button className="flex-1" onClick={save} disabled={saving}>{saving ? "Saving..." : "Save"}</Button>
+            </div>
           </DialogContent>
         </Dialog>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        {(hiddenCount > 0 || showOutOfStock) && (
+        {!showDeleted && (hiddenCount > 0 || showOutOfStock) && (
           <Button variant={showOutOfStock ? "secondary" : "outline"} size="sm" onClick={() => setShowOutOfStock((v) => !v)}
                   title="Browse out-of-stock products too (a search always finds them)">
             {showOutOfStock ? "Hide out of stock" : `Show out of stock (${hiddenCount})`}
           </Button>
         )}
+        {(deleted.length > 0 || showDeleted) && (
+          <Button variant={showDeleted ? "secondary" : "outline"} size="sm" onClick={() => setShowDeleted((v) => !v)}
+                  title="Products you deleted — their sales and purchase records are kept; restore any you still sell">
+            {showDeleted ? "Back to products" : `Deleted products (${deleted.length})`}
+          </Button>
+        )}
         <span className="text-xs text-muted-foreground">
-          {q.trim()
-            ? `${visible.length} match${visible.length === 1 ? "" : "es"}${visibleOut > 0 ? ` · ${visibleOut} out of stock, listed last` : ""}`
-            : showOutOfStock
-              ? `Showing all ${rows.length} products${hiddenCount > 0 ? ` · ${hiddenCount} out of stock, listed last` : ""}`
-              : `Showing ${visible.length} product${visible.length === 1 ? "" : "s"}${hiddenCount > 0 ? ` · ${hiddenCount} out of stock hidden` : ""}`}
+          {showDeleted
+            ? `${term ? `${visible.length} of ` : ""}${deleted.length} deleted product${deleted.length === 1 ? "" : "s"} · records kept · tap Restore to bring one back`
+            : term
+              ? `${visible.length} match${visible.length === 1 ? "" : "es"}${visibleOut > 0 ? ` · ${visibleOut} out of stock, listed last` : ""}${deletedMatches > 0 ? ` · ${deletedMatches} deleted (see Deleted products)` : ""}`
+              : showOutOfStock
+                ? `Showing all ${active.length} products${hiddenCount > 0 ? ` · ${hiddenCount} out of stock, listed last` : ""}`
+                : `Showing ${visible.length} product${visible.length === 1 ? "" : "s"}${hiddenCount > 0 ? ` · ${hiddenCount} out of stock hidden` : ""}`}
         </span>
       </div>
 
@@ -432,7 +510,10 @@ function ProductsAdmin() {
           <thead className="bg-muted text-left text-xs uppercase text-muted-foreground">
             <tr>
               <th className="p-3">Product</th><th className="p-3">Category</th><th className="p-3">Brand</th>
-              <th className="p-3">Stock</th><th className="p-3">Price</th><th className="p-3"></th>
+              <th className="p-3">Stock</th><th className="p-3">Price</th>
+              {/* Actions stay pinned to the right edge, so Edit and Delete are
+                  visible on a phone without scrolling the table sideways. */}
+              <th className="p-3 sticky right-0 bg-muted"></th>
             </tr>
           </thead>
           <tbody>
@@ -441,13 +522,18 @@ function ProductsAdmin() {
                 <td className="p-3 font-medium">
                   <div className="flex items-center gap-3">
                     {r.image_url ? (
-                      <img src={r.image_url} alt="" className="h-10 w-10 rounded object-cover border" />
+                      <img src={r.image_url} alt="" className="h-10 w-10 shrink-0 rounded object-cover border" />
                     ) : (
-                      <div className="h-10 w-10 rounded bg-muted border" />
+                      <div className="h-10 w-10 shrink-0 rounded bg-muted border" />
                     )}
                     <span>{r.product_name}</span>
                     {r.is_deal && <span className="ml-2 text-[10px] rounded-full bg-gold/15 text-amber-700 px-2 py-0.5 font-semibold">Deal</span>}
                     {r.is_featured && <span className="ml-1 text-[10px] rounded-full bg-primary/10 text-primary px-2 py-0.5 font-semibold">Featured</span>}
+                    {isDeleted(r) && (
+                      <span className="ml-1 whitespace-nowrap text-[10px] rounded-full bg-destructive/10 text-destructive px-2 py-0.5 font-semibold">
+                        Deleted {shortDate(r.deleted_at)}
+                      </span>
+                    )}
                   </div>
                 </td>
                 <td className="p-3 text-muted-foreground">{r.categories?.name ?? "—"}</td>
@@ -462,15 +548,29 @@ function ProductsAdmin() {
                   )}
                 </td>
                 <td className="p-3 font-semibold">{money(r.selling_price)}</td>
-                <td className="p-3 text-right">
-                  <Button variant="ghost" size="icon" onClick={() => edit(r)}><Pencil className="h-4 w-4" /></Button>
-                  <Button variant="ghost" size="icon" onClick={() => remove(r)}><Trash2 className="h-4 w-4" /></Button>
+                <td className="p-2 text-right whitespace-nowrap sticky right-0 bg-card shadow-[-8px_0_8px_-8px_rgba(0,0,0,0.15)]">
+                  {isDeleted(r) ? (
+                    <Button variant="outline" size="sm" onClick={() => restore(r)}>
+                      <Undo2 className="h-4 w-4 mr-1.5" /> Restore
+                    </Button>
+                  ) : (
+                    <>
+                      <Button variant="ghost" size="icon" title="Edit" aria-label={`Edit ${r.product_name}`} onClick={() => edit(r)}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" title="Delete" aria-label={`Delete ${r.product_name}`}
+                              className="text-destructive hover:text-destructive" onClick={() => remove(r)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}
             {visible.length === 0 && (
               <tr><td colSpan={6} className="p-10 text-center text-muted-foreground">
-                {rows.length === 0 ? "No products yet." : q.trim() ? (
+                {showDeleted ? (term ? `No deleted product matches “${term}”.` : "No deleted products.")
+                  : active.length === 0 ? "No products yet." : q.trim() ? (
                   <div className="space-y-2">
                     <div>No product matches “{q.trim()}”.</div>
                     <Button variant="outline" size="sm" onClick={() => { startNew(q.trim().replace(/\s+/g, " ")); setOpen(true); }}>

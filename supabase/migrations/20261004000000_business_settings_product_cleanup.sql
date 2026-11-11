@@ -32,7 +32,9 @@ on conflict (key) do nothing;
 --    the copies, every sale/purchase/quotation/amanat row is re-pointed to
 --    it, and the copies are removed. A copy that is the same entry saved
 --    twice (never booked in, identical row created moments later) is not
---    counted as extra stock.
+--    counted as extra stock. The merged product stays deleted (Products →
+--    Delete, 20261111) only when every copy was deleted.
+alter table public.products add column if not exists deleted_at timestamptz;
 do $$
 declare
   grp record;
@@ -91,7 +93,8 @@ begin
            max(c.brand_id::text)::uuid       as brand_id,
            bool_or(c.is_featured)            as is_featured,
            bool_or(c.is_deal)                as is_deal,
-           max(c.deal_end_date)              as deal_end_date
+           max(c.deal_end_date)              as deal_end_date,
+           bool_and(c.deleted_at is not null) as all_deleted
       into rest
     from public.products c
     where c.id = any(grp.ids) and c.id <> keeper;
@@ -119,7 +122,8 @@ begin
         brand_id       = coalesce(brand_id,       rest.brand_id),
         is_featured    = coalesce(is_featured, false) or coalesce(rest.is_featured, false),
         is_deal        = coalesce(is_deal, false)     or coalesce(rest.is_deal, false),
-        deal_end_date  = greatest(deal_end_date, rest.deal_end_date)
+        deal_end_date  = greatest(deal_end_date, rest.deal_end_date),
+        deleted_at     = case when rest.all_deleted then deleted_at end
     where id = keeper;
 
     delete from public.products where id = any(grp.ids) and id <> keeper;

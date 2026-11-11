@@ -1,7 +1,7 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 import { normalizeProductName } from "@/lib/pricing";
-import { isTracked, stockOf } from "@/lib/stock";
+import { isDeleted, isTracked, stockOf } from "@/lib/stock";
 
 export type ProductRow = Database["public"]["Tables"]["products"]["Row"];
 type ProductInsert = Database["public"]["Tables"]["products"]["Insert"];
@@ -13,7 +13,9 @@ type ProductInsert = Database["public"]["Tables"]["products"]["Insert"];
  * and case differences still find the one product. Until the duplicate merge
  * has run several old copies can share a name: the one with the most stock
  * wins (then the one with a shop price, then the newest), the same copy the
- * merge keeps, so restocking lands on the record that will survive.
+ * merge keeps, so restocking lands on the record that will survive. A copy
+ * the shop still carries wins over a deleted one; a deleted product is still
+ * found (one product per name), so entering its name again can restore it.
  */
 export async function findProductByName(name: string): Promise<ProductRow | null> {
   const norm = normalizeProductName(name);
@@ -28,15 +30,29 @@ export async function findProductByName(name: string): Promise<ProductRow | null
   const matches = (data ?? []).filter((p) => normalizeProductName(p.product_name) === norm);
   if (matches.length <= 1) return matches[0] ?? null;
   const rank = (a: ProductRow, b: ProductRow) =>
-    stockOf(b) - stockOf(a)
+    Number(isDeleted(a)) - Number(isDeleted(b))
+    || stockOf(b) - stockOf(a)
     || (Number(b.selling_price) || 0) - (Number(a.selling_price) || 0)
     || (b.created_at ?? "").localeCompare(a.created_at ?? "");
   return [...matches].sort(rank)[0];
 }
 
 /**
+ * Bring a deleted product back into the lists (Products → Deleted products,
+ * or its name entered again). Returns the restored row.
+ */
+export async function restoreProduct(id: string): Promise<{ product: ProductRow | null; error: string | null }> {
+  const { data, error } = await supabase.from("products").update({ deleted_at: null })
+    .eq("id", id).select().maybeSingle();
+  if (error) return { product: null, error: error.message };
+  if (!data) return { product: null, error: "Product not found — refresh the page" };
+  return { product: data, error: null };
+}
+
+/**
  * Quick-add from a picker: reuse the product that already carries this name,
- * otherwise create it. A race with another device (unique-name violation
+ * otherwise create it. A deleted product of that name is restored rather
+ * than entered twice. A race with another device (unique-name violation
  * 23505) is resolved by fetching the row the other device created.
  * Stock always starts at 0 — purchases and adjustments move it.
  */
@@ -48,6 +64,7 @@ export async function getOrCreateProduct(
   if (!clean) return { product: null, created: false, error: "Product name required" };
   try {
     const existing = await findProductByName(clean);
+    if (existing && isDeleted(existing)) return { ...(await restoreProduct(existing.id)), created: false };
     if (existing) return { product: existing, created: false, error: null };
     const { data, error } = await supabase.from("products")
       .insert({ purchase_price: 0, selling_price: 0, ...extra, product_name: clean, quantity_in_stock: 0 })
@@ -55,6 +72,7 @@ export async function getOrCreateProduct(
     if (error) {
       if (error.code === "23505") {
         const again = await findProductByName(clean);
+        if (again && isDeleted(again)) return { ...(await restoreProduct(again.id)), created: false };
         if (again) return { product: again, created: false, error: null };
         return { product: null, created: false, error: "A product with this name already exists" };
       }

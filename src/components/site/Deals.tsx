@@ -43,6 +43,7 @@ export function Deals() {
         .select("id, product_name, image_url, selling_price, quantity_in_stock, track_stock, deal_end_date")
         .eq("is_deal", true)
         .eq("track_stock", true).gt("quantity_in_stock", 0).gt("selling_price", 0)
+        .is("deleted_at", null)
         // Expired deals stay ticked until the admin unticks them; keep them
         // out of the query so they can't crowd live deals out of the limit.
         .or(`deal_end_date.is.null,deal_end_date.gt.${new Date().toISOString()}`)

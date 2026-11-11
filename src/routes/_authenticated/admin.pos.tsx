@@ -48,7 +48,9 @@ function PosPage() {
 
   const load = async () => {
     const [{ data: p }, { data: c }] = await Promise.all([
-      fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock").order("product_name").order("id").range(a, b)),
+      // Deleted products (Products → Delete) are not sold here.
+      fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock")
+        .is("deleted_at", null).order("product_name").order("id").range(a, b)),
       supabase.from("clients").select("id, name, account_no, current_balance").order("name"),
     ]);
     setProducts(p ?? []); setClients(c ?? []);
@@ -102,7 +104,9 @@ function PosPage() {
   const createProduct = async (name: string) => {
     const { product, created, error } = await getOrCreateProduct(name);
     if (error || !product) return toast.error(error ?? "Could not add product");
-    setProducts((ps) => (ps.some((p) => p.id === product.id) ? ps : [...ps, product]));
+    // A deleted product of this name comes back restored: refresh its row.
+    setProducts((ps) => (ps.some((p) => p.id === product.id)
+      ? ps.map((p) => (p.id === product.id ? { ...p, ...product } : p)) : [...ps, product]));
     addToCart(product);
     toast.success(created
       ? `New product "${product.product_name}" added — set its price in the cart`

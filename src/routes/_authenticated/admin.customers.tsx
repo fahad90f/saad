@@ -187,7 +187,9 @@ function CustomersAdmin() {
                 // Reuse an existing product with the same name (any spacing/case).
                 const { product, created, error } = await getOrCreateProduct(name);
                 if (error || !product) return toast.error(error ?? "Could not add product");
-                setProducts((ps: any[]) => (ps.some((p) => p.id === product.id) ? ps : [...ps, product]));
+                // A deleted product of this name comes back restored: refresh its row.
+                setProducts((ps: any[]) => (ps.some((p) => p.id === product.id)
+                  ? ps.map((p) => (p.id === product.id ? { ...p, ...product } : p)) : [...ps, product]));
                 setForm((f: any) => ({
                   ...f, product_id: product.id,
                   total_price: created ? 0 : effectivePrice(product) * (Number(f.quantity_purchased) || 1),

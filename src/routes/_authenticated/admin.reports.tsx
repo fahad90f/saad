@@ -56,7 +56,8 @@ function Reports() {
         fetchAll((a, b) => supabase.from("invoice_payments").select("id, amount, method, payment_date, invoices(client_id)").order("id").range(a, b)),
         fetchAll((a, b) => supabase.from("client_ledger").select("id, amount, method, entry_date, reference").eq("entry_type", "payment").order("id").range(a, b)),
         fetchAll((a, b) => supabase.from("expenses").select("id, amount, date_of_expense").order("id").range(a, b)),
-        fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock").order("id").range(a, b)),
+        // Reorder list: products the shop still carries (not deleted).
+        fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock").is("deleted_at", null).order("id").range(a, b)),
         // Every sale (POS, khaata, quotations) is an invoice; returns shrink
         // its lines in place, so this is what actually sold recently.
         fetchAll((a, b) => supabase.from("invoices")

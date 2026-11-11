@@ -19,6 +19,12 @@ export type SearchableOption = {
    * label carries more (e.g. "CUST-1005 · Ali Khan" → "Ali Khan"). Defaults to the label.
    */
   matchText?: string;
+  /**
+   * Never offered (e.g. a deleted product); only shown as the current value
+   * of an old record. Its name does not block "Add new" — adding it brings
+   * the record back.
+   */
+  hidden?: boolean;
 };
 
 const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
@@ -52,9 +58,10 @@ export function SearchableSelect({
   // Hidden (search-only) options still count here, so "Add new" is never
   // offered for a name that already exists — typing it shows the existing one.
   const canCreate = !!onCreate && trimmed.length > 0 &&
-    !options.some((o) => norm(o.matchText ?? o.label) === norm(trimmed));
-  const visible = trimmed ? options : options.filter((o) => !o.searchOnly || o.value === value);
-  const hiddenCount = options.length - visible.length;
+    !options.some((o) => !o.hidden && norm(o.matchText ?? o.label) === norm(trimmed));
+  const offered = options.filter((o) => !o.hidden || o.value === value);
+  const visible = trimmed ? offered : offered.filter((o) => !o.searchOnly || o.value === value);
+  const hiddenCount = offered.length - visible.length;
 
   return (
     <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setQuery(""); }}>

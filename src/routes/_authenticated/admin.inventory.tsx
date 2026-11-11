@@ -5,7 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { money, shortDate, localDateOf, localToday } from "@/lib/format";
 import { matchesQuery } from "@/lib/search";
 import { effectivePrice } from "@/lib/pricing";
-import { stockOf, isTracked, inStock, oversold, stockLabel, hiddenFromBrowse } from "@/lib/stock";
+import { stockOf, isTracked, inStock, oversold, stockLabel, hiddenFromBrowse, activeProducts, isDeleted } from "@/lib/stock";
 import { printArea } from "@/lib/print";
 import { InvoiceQuickView, InvoiceRefLink } from "@/components/admin/InvoiceQuickView";
 import { Input } from "@/components/ui/input";
@@ -173,8 +173,11 @@ function Inventory() {
   // Only stock-tracked products count as stock: services and trade-ins are
   // sold without ever being booked in. Units on hand are never negative —
   // a product sold before its purchase was booked is simply out of stock.
-  const tracked = products.filter(isTracked);
-  const notTracked = products.length - tracked.length;
+  // Deleted products (Products → Delete) keep their movements above but are
+  // no longer counted or listed as stock.
+  const carried = activeProducts(products);
+  const tracked = carried.filter(isTracked);
+  const notTracked = carried.length - tracked.length;
   const outOfStock = tracked.filter(hiddenFromBrowse).length;
 
   // The stock list to print: what is on the shelf — every tracked product
@@ -244,6 +247,7 @@ function Inventory() {
             <div className="col-span-2 lg:col-span-1 min-w-0">
               <div className="text-[10px] uppercase text-muted-foreground tracking-wider">Product</div>
               <b className="break-words">{focusProduct.product_name}</b>
+              {isDeleted(focusProduct) && <span className="ml-1.5 text-[10px] rounded-full bg-destructive/10 text-destructive px-2 py-0.5 font-semibold">Deleted</span>}
             </div>
             <div>
               <div className="text-[10px] uppercase text-muted-foreground tracking-wider">Current stock</div>

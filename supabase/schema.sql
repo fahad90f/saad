@@ -90,7 +90,9 @@ create table public.products (
   deal_end_date timestamptz,
   is_deal boolean,
   created_at timestamptz not null default now(),
-  is_featured boolean
+  is_featured boolean,
+  -- Products → Delete on a product with history (20261111): hidden, history kept
+  deleted_at timestamptz
 );
 
 create table public.expenses (

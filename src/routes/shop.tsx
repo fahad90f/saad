@@ -50,6 +50,7 @@ function Shop() {
       const [{ data: p }, { data: c }, { data: b }] = await Promise.all([
         fetchAll((a, b) => supabase.from("products").select("*")
           .eq("track_stock", true).gt("quantity_in_stock", 0).gt("selling_price", 0)
+          .is("deleted_at", null)
           .order("created_at", { ascending: false }).order("id").range(a, b)),
         supabase.from("categories").select("id, name").order("display_order"),
         supabase.from("brands").select("id, name").order("name"),

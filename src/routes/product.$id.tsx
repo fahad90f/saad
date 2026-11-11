@@ -35,9 +35,9 @@ function ProductDetail() {
   // The page stays reachable (WhatsApp messages link here) but a customer
   // only ever sees "In stock" or "Currently unavailable" — never a count,
   // and never a Rs 0 price: services/trade-ins (not stock-tracked),
-  // anything sold out and unpriced products all read as unavailable.
+  // anything sold out, unpriced and deleted products all read as unavailable.
   const priced = Number(p.selling_price) > 0;
-  const available = isTracked(p) && stockOf(p) > 0 && priced;
+  const available = !p.deleted_at && isTracked(p) && stockOf(p) > 0 && priced;
   const wa = `https://wa.me/?text=${encodeURIComponent(`Hi, I'm interested in ${p.product_name}${priced ? ` (${money(p.selling_price)})` : ""} from ${COMPANY.name}.`)}`;
 
   return (

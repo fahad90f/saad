@@ -9,7 +9,8 @@
 -- invoice payment-method label sync, the product-images bucket,
 -- business settings + duplicate-product merge, the stock ledger,
 -- Customer/Merchant Amanat, monthly payroll, admin roles, product
--- clean-up (sold-out junk purge + history guard) and live dashboard.
+-- clean-up (sold-out junk purge + history guard), live dashboard and
+-- product delete (deleted products hidden, history kept).
 -- Sab se aakhir mein har product ka stock ledger ke mutabiq dobara
 -- set ho jata hai, is liye yeh file kabhi bhi dobara chalayi ja sakti hai.
 -- ============================================================
@@ -348,7 +349,9 @@ on conflict (key) do nothing;
 --    the copies, every sale/purchase/quotation/amanat row is re-pointed to
 --    it, and the copies are removed. A copy that is the same entry saved
 --    twice (never booked in, identical row created moments later) is not
---    counted as extra stock.
+--    counted as extra stock. The merged product stays deleted (Products →
+--    Delete, 20261111) only when every copy was deleted.
+alter table public.products add column if not exists deleted_at timestamptz;
 do $$
 declare
   grp record;
@@ -407,7 +410,8 @@ begin
            max(c.brand_id::text)::uuid       as brand_id,
            bool_or(c.is_featured)            as is_featured,
            bool_or(c.is_deal)                as is_deal,
-           max(c.deal_end_date)              as deal_end_date
+           max(c.deal_end_date)              as deal_end_date,
+           bool_and(c.deleted_at is not null) as all_deleted
       into rest
     from public.products c
     where c.id = any(grp.ids) and c.id <> keeper;
@@ -435,7 +439,8 @@ begin
         brand_id       = coalesce(brand_id,       rest.brand_id),
         is_featured    = coalesce(is_featured, false) or coalesce(rest.is_featured, false),
         is_deal        = coalesce(is_deal, false)     or coalesce(rest.is_deal, false),
-        deal_end_date  = greatest(deal_end_date, rest.deal_end_date)
+        deal_end_date  = greatest(deal_end_date, rest.deal_end_date),
+        deleted_at     = case when rest.all_deleted then deleted_at end
     where id = keeper;
 
     delete from public.products where id = any(grp.ids) and id <> keeper;
@@ -1352,3 +1357,37 @@ begin
     end if;
   end loop;
 end $$;
+
+-- Deleting products.
+--
+-- Products → Delete works for every product. A product that never did
+-- anything (no sale, purchase, quotation or amanat) is erased. One with
+-- history is marked deleted instead (deleted_at): it leaves the Products
+-- list, the POS, every product picker, the stock lists and the website,
+-- while its old invoices, purchases, ledgers and reports keep showing it.
+-- Erasing it would blank the product on those rows, which
+-- products_keep_history (20261020000300) refuses.
+--
+-- A deleted product is restored from Products → Deleted products, by
+-- entering its name again (one product per name — the app brings the old
+-- record back instead of making a copy), or by booking a purchase of it
+-- (below): stock arriving means the shop carries it again.
+--
+-- Safe to re-run (no drops).
+
+alter table public.products add column if not exists deleted_at timestamptz;
+
+create or replace function public.products_restore_on_purchase()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  update public.products set deleted_at = null
+   where id = new.product_id and deleted_at is not null;
+  return null;
+end $$;
+revoke execute on function public.products_restore_on_purchase() from public, anon, authenticated;
+
+create or replace trigger products_restore_on_purchase
+  after insert or update of product_id on public.stock_purchases
+  for each row execute function public.products_restore_on_purchase();
+
+notify pgrst, 'reload schema';
