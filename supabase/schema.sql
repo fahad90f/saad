@@ -318,6 +318,11 @@ create index if not exists stock_purchases_merchant_id_idx on public.stock_purch
 create index if not exists quotation_items_quotation_id_idx on public.quotation_items (quotation_id);
 create index if not exists invoice_payments_invoice_id_idx on public.invoice_payments (invoice_id);
 create index if not exists invoice_items_product_id_idx on public.invoice_items (product_id);
+-- One product per name among listed products: spaces, punctuation and case
+-- ignored (20261113).
+create unique index if not exists products_name_key_uidx
+  on public.products ((lower(regexp_replace(product_name, '[^[:alnum:]]+', '', 'g'))))
+  where deleted_at is null;
 create index if not exists stock_purchases_product_id_idx on public.stock_purchases (product_id);
 create index if not exists stock_adjustments_product_id_idx on public.stock_adjustments (product_id);
 create index if not exists invoice_payments_payment_date_idx on public.invoice_payments (payment_date);

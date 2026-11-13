@@ -14,6 +14,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowDownToLine, ArrowUpFromLine, Package, AlertTriangle, Search, X, Printer } from "lucide-react";
 import { COMPANY } from "@/lib/company";
 import { fetchAll } from "@/lib/fetchAll";
+import { useLiveReload } from "@/lib/useLiveReload";
 
 export const Route = createFileRoute("/_authenticated/admin/inventory")({
   component: Inventory,
@@ -77,17 +78,22 @@ function Inventory() {
     return () => clearTimeout(t);
   }, [stockPrint]);
 
-  useEffect(() => {
-    (async () => {
-      const [{ data: p }, { data: sin }, { data: sout }, { data: adj }] = await Promise.all([
-        fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock, purchase_price, selling_price").order("product_name").order("id").range(a, b)),
-        fetchAll((a, b) => supabase.from("stock_purchases").select("*, products(product_name), merchants(name)").order("date", { ascending: false }).order("created_at", { ascending: false }).order("id").range(a, b)),
-        fetchAll((a, b) => supabase.from("invoice_items").select("*, invoices(invoice_id, customer_name, created_at)").order("id", { ascending: false }).order("id").range(a, b)),
-        fetchAll((a, b) => supabase.from("stock_adjustments").select("id, product_id, delta, reason, note, created_at").order("created_at", { ascending: false }).order("id").range(a, b)),
-      ]);
-      setProducts(p ?? []); setStockIn(sin ?? []); setStockOut(sout ?? []); setAdjustments((adj ?? []) as Adjustment[]);
-    })();
-  }, []);
+  // Loaded on open and again whenever stock moves anywhere (a sale on the
+  // POS, a purchase, a count — on this device or another), so a sale shows
+  // here within seconds. A background refresh that fails keeps what is shown.
+  const load = async (quiet = false) => {
+    const opt = { quiet };
+    const [p, sin, sout, adj] = await Promise.all([
+      fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock, purchase_price, selling_price, deleted_at").order("product_name").order("id").range(a, b), 1000, opt),
+      fetchAll((a, b) => supabase.from("stock_purchases").select("*, products(product_name), merchants(name)").order("date", { ascending: false }).order("created_at", { ascending: false }).order("id").range(a, b), 1000, opt),
+      fetchAll((a, b) => supabase.from("invoice_items").select("*, invoices(invoice_id, customer_name, created_at)").order("id", { ascending: false }).order("id").range(a, b), 1000, opt),
+      fetchAll((a, b) => supabase.from("stock_adjustments").select("id, product_id, delta, reason, note, created_at").order("created_at", { ascending: false }).order("id").range(a, b), 1000, opt),
+    ]);
+    if (quiet && [p, sin, sout, adj].some((r) => r.error)) return;
+    setProducts(p.data); setStockIn(sin.data); setStockOut(sout.data); setAdjustments(adj.data as Adjustment[]);
+  };
+  useEffect(() => { void load(); }, []);
+  useLiveReload(["products", "stock_purchases", "invoice_items", "stock_adjustments"], () => { void load(true); });
 
   const nameOf = useMemo(() => new Map<string, string>(products.map((p) => [p.id, p.product_name ?? "—"])), [products]);
 

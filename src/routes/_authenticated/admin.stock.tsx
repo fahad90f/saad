@@ -41,7 +41,7 @@ function StockAdmin() {
   const load = async () => {
     const [{ data: r, error: rErr }, { data: p }, { data: m }] = await Promise.all([
       fetchAll((a, b) => supabase.from("stock_purchases").select("*, products(product_name)").order("date", { ascending: false }).order("created_at", { ascending: false }).order("id").range(a, b)),
-      fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, purchase_price, selling_price, track_stock").order("id").range(a, b)),
+      fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, purchase_price, selling_price, track_stock, deleted_at").order("id").range(a, b)),
       supabase.from("merchants").select("id, name, account_no").order("name"),
     ]);
     // An empty list used to look identical to a failed query. Say which it is.

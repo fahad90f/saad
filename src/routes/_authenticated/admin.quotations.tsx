@@ -51,7 +51,7 @@ function QuotationsAdmin() {
   const load = async () => {
     const [{ data: r }, { data: p }, { data: c }] = await Promise.all([
       supabase.from("quotations").select("*").order("created_at", { ascending: false }),
-      fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock").order("id").range(a, b)),
+      fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock, deleted_at").order("id").range(a, b)),
       supabase.from("clients").select("id, name, account_no").order("name"),
     ]);
     setRows(r ?? []); setProducts(p ?? []); setClients(c ?? []);

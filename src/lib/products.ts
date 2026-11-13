@@ -8,9 +8,10 @@ type ProductInsert = Database["public"]["Tables"]["products"]["Insert"];
 
 /**
  * The product whose normalised name equals `name`, or null. The database is
- * asked for a loose ILIKE match (every word of the name, in order, with
- * anything in between) and the exact comparison happens here, so spacing
- * and case differences still find the one product. Until the duplicate merge
+ * asked for a loose ILIKE match (every letter and digit of the name, in
+ * order, with anything in between) and the exact comparison happens here, so
+ * spacing, punctuation and case differences ("HT 200" / "Ht200") still find
+ * the one product. Until the duplicate merge
  * has run several old copies can share a name: the one with the most stock
  * wins (then the one with a shop price, then the newest), the same copy the
  * merge keeps, so restocking lands on the record that will survive. A copy
@@ -20,12 +21,10 @@ type ProductInsert = Database["public"]["Tables"]["products"]["Insert"];
 export async function findProductByName(name: string): Promise<ProductRow | null> {
   const norm = normalizeProductName(name);
   if (!norm) return null;
-  // Only letters/digits go into the pattern; punctuation becomes a wildcard,
-  // so nothing needs LIKE-escaping and over-matching is harmless.
-  const words = norm.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  if (words.length === 0) return null;
+  // The key holds only letters/digits, so nothing needs LIKE-escaping, and
+  // over-matching is harmless (the exact check is below).
   const { data, error } = await supabase.from("products").select("*")
-    .ilike("product_name", `%${words.join("%")}%`).limit(500);
+    .ilike("product_name", `%${[...norm].join("%")}%`).limit(500);
   if (error) throw error;
   const matches = (data ?? []).filter((p) => normalizeProductName(p.product_name) === norm);
   if (matches.length <= 1) return matches[0] ?? null;
@@ -44,7 +43,11 @@ export async function findProductByName(name: string): Promise<ProductRow | null
 export async function restoreProduct(id: string): Promise<{ product: ProductRow | null; error: string | null }> {
   const { data, error } = await supabase.from("products").update({ deleted_at: null })
     .eq("id", id).select().maybeSingle();
-  if (error) return { product: null, error: error.message };
+  if (error) {
+    return { product: null, error: error.code === "23505"
+      ? "another product with this name is already in the list — use that one"
+      : error.message };
+  }
   if (!data) return { product: null, error: "Product not found — refresh the page" };
   return { product: data, error: null };
 }
