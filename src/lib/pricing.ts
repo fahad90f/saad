@@ -60,9 +60,11 @@ export const effectivePrice = (p: { selling_price?: number | string | null; purc
 };
 
 /**
- * One product name per product: trim, collapse whitespace, lower-case.
- * Matches the normalised unique index on `products.product_name`, so a
- * quick-add that spells an existing name differently reuses that product.
+ * One product per name: the name's letters and digits, lower-cased — spaces,
+ * punctuation and case are ignored, so "HT 200 Osaka 21p" and
+ * "Ht200 osaka 21p" are the same product. Matches the unique name-key index
+ * on `products` (20261113), so a quick-add that spells an existing name
+ * differently reuses that product instead of starting a second stock count.
  */
 export const normalizeProductName = (name: string | null | undefined) =>
-  (name ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+  (name ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");

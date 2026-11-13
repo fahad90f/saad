@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Search, X, Undo2 } from "lucide-react";
 import { ImageUpload } from "@/components/admin/ImageUpload";
 import { fetchAll } from "@/lib/fetchAll";
+import { useLiveReload } from "@/lib/useLiveReload";
 
 export const Route = createFileRoute("/_authenticated/admin/products")({
   component: ProductsAdmin,
@@ -75,19 +76,26 @@ function ProductsAdmin() {
   const [reason, setReason] = useState<string>(ADJUST_REASONS[0]);
   const [note, setNote] = useState("");
 
-  const load = async () => {
-    const [{ data: p }, { data: c }, { data: s }, { data: b }] = await Promise.all([
-      fetchAll((a, b) => supabase.from("products").select("*, categories(name), brands(name)").order("created_at", { ascending: false }).order("id").range(a, b)),
+  const load = async (quiet = false) => {
+    const [{ data: p, error: pErr }, { data: c }, { data: s }, { data: b }] = await Promise.all([
+      fetchAll((a, b) => supabase.from("products").select("*, categories(name), brands(name)").order("created_at", { ascending: false }).order("id").range(a, b), 1000, { quiet }),
       supabase.from("categories").select("id, name"),
       supabase.from("subcategories").select("id, name, category_id"),
       supabase.from("brands").select("id, name"),
     ]);
+    // A background refresh that fails keeps the list on screen.
+    if (quiet && pErr) return;
     // In-stock products first, out-of-stock at the end; newest first within
     // each group (the order this table always used).
     setRows(inStockFirst(p ?? [], (a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")));
-    setCats(c ?? []); setSubs(s ?? []); setBrands(b ?? []);
+    if (c) setCats(c);
+    if (s) setSubs(s);
+    if (b) setBrands(b);
   };
   useEffect(() => { load(); }, []);
+  // Stock and prices stay current while the page is open (a sale on the POS
+  // or a purchase booked on another device shows within seconds).
+  useLiveReload(["products", "stock_purchases", "invoice_items", "stock_adjustments"], () => { void load(true); });
 
   const startNew = (name = "") => {
     setEditing(null); setEditingName(""); setForm({ ...empty, product_name: name }); setOpeningStock("");
@@ -302,6 +310,45 @@ function ProductsAdmin() {
     load();
   };
 
+  // Clear every sold-out product in one go: each stock-tracked product at or
+  // below zero still in the list is marked deleted (nothing is erased). Its
+  // sales and purchases stay on record, booking a purchase of it brings it
+  // back by itself, and Deleted products → Restore (or Undo) undoes it.
+  const deleteAllOutOfStock = async () => {
+    const ids: string[] = active.filter(hiddenFromBrowse).map((r) => r.id);
+    if (ids.length === 0) return;
+    if (!confirm(
+      `Delete all ${ids.length} out-of-stock product${ids.length === 1 ? "" : "s"}?\n\n`
+      + "They leave the product list, POS, pickers and the website. Their sales and purchase records are kept, "
+      + "a product comes back by itself when you book a purchase of it, and you can restore any of them from \"Deleted products\".")) return;
+    const stamp = new Date().toISOString();
+    let done = 0;
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      // Only rows still at or below zero — a purchase booked meanwhile keeps its product.
+      const { data, error } = await supabase.from("products").update({ deleted_at: stamp })
+        .in("id", chunk).is("deleted_at", null).lte("quantity_in_stock", 0).select("id");
+      if (error) { toast.error(`Stopped after ${done}: ${error.message}`); break; }
+      done += (data ?? []).length;
+    }
+    if (done > 0) {
+      toast.success(`${done} out-of-stock product${done === 1 ? "" : "s"} deleted`, {
+        description: "Their records are kept. Restore any of them from Deleted products.",
+        duration: 15000,
+        action: {
+          label: "Undo",
+          onClick: async () => {
+            for (let i = 0; i < ids.length; i += 200) {
+              await supabase.from("products").update({ deleted_at: null }).in("id", ids.slice(i, i + 200)).eq("deleted_at", stamp);
+            }
+            toast.success("Restored"); load();
+          },
+        },
+      });
+    }
+    load();
+  };
+
   const restore = async (r: any) => {
     const { error } = await restoreProduct(r.id);
     if (error) return toast.error(`Could not restore "${r.product_name}": ${error}`);
@@ -486,6 +533,12 @@ function ProductsAdmin() {
           <Button variant={showOutOfStock ? "secondary" : "outline"} size="sm" onClick={() => setShowOutOfStock((v) => !v)}
                   title="Browse out-of-stock products too (a search always finds them)">
             {showOutOfStock ? "Hide out of stock" : `Show out of stock (${hiddenCount})`}
+          </Button>
+        )}
+        {!showDeleted && hiddenCount > 0 && (
+          <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={deleteAllOutOfStock}
+                  title="Delete every stock-tracked product with nothing in stock (records kept; restore any time)">
+            <Trash2 className="h-4 w-4 mr-1.5" /> Delete all out of stock ({hiddenCount})
           </Button>
         )}
         {(deleted.length > 0 || showDeleted) && (

@@ -78,6 +78,8 @@ export type AmanatProduct = {
   product_name: string | null;
   quantity_in_stock: number | null;
   track_stock: boolean | null;
+  /** Set when deleted on the Products page: never offered for a new entry. */
+  deleted_at?: string | null;
 };
 
 /** Party columns loaded for pickers and the detail views. */
@@ -288,7 +290,7 @@ export function AmanatForm({
 
   useEffect(() => {
     if (!products) {
-      fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock")
+      fetchAll((a, b) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock, deleted_at")
         .order("product_name").order("id").range(a, b))
         .then(({ data }) => setOwnProducts(data as AmanatProduct[]));
     }

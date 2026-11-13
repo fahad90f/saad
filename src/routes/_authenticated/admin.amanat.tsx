@@ -46,7 +46,7 @@ function AmanatPage() {
     const [a, p, c, m] = await Promise.all([
       fetchAll((from, to) => supabase.from("amanat_items").select(AMANAT_SELECT)
         .order("given_date", { ascending: false }).order("created_at", { ascending: false }).order("id").range(from, to)),
-      fetchAll((from, to) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock")
+      fetchAll((from, to) => supabase.from("products").select("id, product_name, quantity_in_stock, track_stock, deleted_at")
         .order("product_name").order("id").range(from, to)),
       fetchAll((from, to) => supabase.from("clients").select(PARTY_COLUMNS).order("name").order("id").range(from, to)),
       fetchAll((from, to) => supabase.from("merchants").select(PARTY_COLUMNS).order("name").order("id").range(from, to)),

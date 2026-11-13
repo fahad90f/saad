@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Search, Plus, Minus, Trash2, Zap, Banknote, SplitSquareHorizontal, Printer } from "lucide-react";
 import { COMPANY } from "@/lib/company";
 import { fetchAll } from "@/lib/fetchAll";
+import { useLiveReload } from "@/lib/useLiveReload";
 
 export const Route = createFileRoute("/_authenticated/admin/pos")({
   component: PosPage,
@@ -46,16 +47,26 @@ function PosPage() {
   const [viewInvoice, setViewInvoice] = useState<string | null>(null);
   const [stockPrint, setStockPrint] = useState(false);
 
+  // Deleted products (Products → Delete) are not sold here.
+  const fetchProducts = (quiet = false) =>
+    fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock")
+      .is("deleted_at", null).order("product_name").order("id").range(a, b), 1000, { quiet });
   const load = async () => {
     const [{ data: p }, { data: c }] = await Promise.all([
-      // Deleted products (Products → Delete) are not sold here.
-      fetchAll((a, b) => supabase.from("products").select("id, product_name, selling_price, purchase_price, quantity_in_stock, track_stock")
-        .is("deleted_at", null).order("product_name").order("id").range(a, b)),
+      fetchProducts(),
       supabase.from("clients").select("id, name, account_no, current_balance").order("name"),
     ]);
     setProducts(p ?? []); setClients(c ?? []);
   };
   useEffect(() => { load(); }, []);
+
+  // Stock and prices stay current while the page is open: a purchase booked,
+  // a sale made or a price changed on another device (the phone, the shop
+  // laptop) shows here within seconds, without reloading the page. A failed
+  // background refresh keeps the list on screen. The cart is left alone.
+  useLiveReload(["products", "stock_purchases", "invoice_items", "stock_adjustments"], () => {
+    void fetchProducts(true).then(({ data, error }) => { if (!error) setProducts(data); });
+  });
 
   // Every typed word must appear in the name, in any order — so
   // "Bandalayar 12 Evergreen" and "Evergreen Bandalayar 12" both match.
@@ -348,6 +359,18 @@ function PosPage() {
                               title={saved > 0 ? `Product price is ${money(saved)} — make ${money(typed)} the new shop price` : "This product has no shop price yet"}>
                         Save {money(typed)} as product price
                       </button>
+                    );
+                  })()}
+                  {(() => {
+                    // The live stock of this product (refreshed while the page is open).
+                    const prod = products.find((p) => p.id === l.product_id);
+                    if (!prod || !isTracked(prod)) return null;
+                    const left = stockOf(prod);
+                    return (
+                      <div className={`mt-1.5 text-[11px] ${left >= l.qty ? "text-muted-foreground" : "text-destructive font-semibold"}`}>
+                        {left > 0 ? `${left} in stock` : "Out of stock"}
+                        {left < l.qty && ` — selling ${l.qty}${left > 0 ? `, ${l.qty - left} more than in stock` : ""}`}
+                      </div>
                     );
                   })()}
                   <div className="mt-2 flex items-center justify-between">
