@@ -25,7 +25,10 @@ export const Route = createFileRoute("/_authenticated/admin/pos")({
   component: PosPage,
 });
 
-type CartLine = { product_id: string; name: string; qty: number; price: number; cost: number | null; stock: number };
+// `cost` is the purchase price of one unit. Until the cashier types one
+// (`costTouched`) the product's live cost is used, so a cost entered on
+// another screen or device meanwhile is picked up.
+type CartLine = { product_id: string; name: string; qty: number; price: number; cost: number | null; costTouched?: boolean; stock: number };
 type PayLine = { method: string; amount: number };
 
 function PosPage() {
@@ -102,7 +105,7 @@ function PosPage() {
       if (i >= 0) return c.map((l, j) => (j === i ? { ...l, qty: l.qty + 1 } : l));
       return [...c, {
         product_id: p.id, name: p.product_name, qty: 1,
-        price: effectivePrice(p), cost: p.purchase_price ?? null,
+        price: effectivePrice(p), cost: Number(p.purchase_price) > 0 ? Number(p.purchase_price) : null,
         stock: stockOf(p),
       }];
     });
@@ -137,6 +140,32 @@ function PosPage() {
     toast.success(`${line.name}: shop price saved as ${money(price)}`);
   };
 
+  // The cost of one unit on a cart line: what the cashier typed, else the
+  // product's current cost; null while unknown.
+  const productCost = (id: string) => {
+    const c = Number(products.find((p) => p.id === id)?.purchase_price);
+    return c > 0 ? c : null;
+  };
+  const lineCost = (l: CartLine) => (l.costTouched ? (Number(l.cost) > 0 ? Number(l.cost) : null) : productCost(l.product_id) ?? l.cost);
+  const uncostedLines = cart.filter((l) => lineCost(l) == null).length;
+  const billProfit = cart.reduce((a, l) => {
+    const c = lineCost(l);
+    return c == null ? a : a + l.qty * (Number(l.price) - c);
+  }, 0);
+
+  // The typed cost becomes the product's purchase price; its earlier sales
+  // that had no cost take it too (database), so their profit corrects itself.
+  const saveAsProductCost = async (line: CartLine) => {
+    const cost = Number(line.cost);
+    if (!(cost > 0)) return toast.error("Enter the cost first");
+    const { data, error } = await supabase.from("products").update({ purchase_price: cost })
+      .eq("id", line.product_id).select("id").maybeSingle();
+    if (error) return toast.error(error.message);
+    if (!data) return toast.error("Product not found — refresh the page");
+    setProducts((ps) => ps.map((p) => (p.id === line.product_id ? { ...p, purchase_price: cost } : p)));
+    toast.success(`${line.name}: cost saved as ${money(cost)}`);
+  };
+
   const reset = () => {
     setCart([]); setCustomerName(""); setClientId(""); setSaleDate(localToday());
     setSplitMode(false); setCashReceived(""); setPayLines([{ method: "cash", amount: 0 }]); setDueDate("");
@@ -163,6 +192,14 @@ function PosPage() {
       // may have sold meanwhile). Selling past zero needs a yes.
       if (!(await confirmStockForSale(cart.map((l) => ({ product_id: l.product_id, qty: l.qty }))))) return;
 
+      // Each line's cost for the profit: the cost typed on the line, else the
+      // product's cost as it is right now (fresh read — never a stale 0).
+      // Unknown stays empty, never 0: a 0 would count the sale as all profit.
+      const ids = [...new Set(cart.map((l) => l.product_id))];
+      const { data: costRows } = await supabase.from("products").select("id, purchase_price").in("id", ids);
+      const liveCost = new Map((costRows ?? []).map((p) => [p.id, Number(p.purchase_price) > 0 ? Number(p.purchase_price) : null]));
+      const costOf = (l: CartLine) => (l.costTouched && Number(l.cost) > 0 ? Number(l.cost) : liveCost.get(l.product_id) ?? null);
+
       const invId = "INV-" + Date.now();
       const { data: inv, error } = await supabase.from("invoices").insert({
         invoice_id: invId, customer_name: name, total_amount: total,
@@ -178,7 +215,7 @@ function PosPage() {
       const { error: itemsErr } = await supabase.from("invoice_items").insert(cart.map((l) => ({
         invoice_id: inv.id, product_id: l.product_id, product_name: l.name,
         quantity: l.qty, unit_price: l.price, total_price: l.qty * l.price,
-        cost_price: l.cost,
+        cost_price: costOf(l),
       })));
       if (itemsErr) {
         await supabase.from("invoices").delete().eq("id", inv.id);
@@ -198,11 +235,19 @@ function PosPage() {
       const { error: cpErr } = await supabase.from("customer_purchases").insert(cart.map((l) => ({
         customer_name: name, product_id: l.product_id,
         quantity_purchased: l.qty, total_price: l.qty * l.price,
-        cost_price: l.cost, payment_method: methodSummary, payment_status: status,
+        cost_price: costOf(l), payment_method: methodSummary, payment_status: status,
         purchase_date: txDate,
         payment_due_date: remaining > 0 && dueDate ? dueDate : null,
       })));
       if (cpErr) toast.error(`Sale saved, but the sales history row failed: ${cpErr.message}`);
+
+      // A product sold with a typed cost but none on record keeps that cost,
+      // so the next sale knows it (and older sales without a cost take it).
+      for (const l of cart) {
+        if (l.costTouched && Number(l.cost) > 0 && liveCost.get(l.product_id) == null) {
+          await supabase.from("products").update({ purchase_price: Number(l.cost) }).eq("id", l.product_id);
+        }
+      }
 
       if (clientId) {
         await supabase.from("client_ledger").insert({
@@ -373,6 +418,42 @@ function PosPage() {
                       </div>
                     );
                   })()}
+                  {(() => {
+                    // Internal: what one unit cost us, and the line's profit.
+                    // Never printed on the slip.
+                    const cost = lineCost(l);
+                    const saved = productCost(l.product_id);
+                    const shown = l.costTouched ? (l.cost ?? "") : (cost ?? "");
+                    return (
+                      <div className="mt-2 grid grid-cols-2 gap-2 items-end">
+                        <div className="space-y-1">
+                          <div className="text-[11px] text-muted-foreground">Cost each (Rs)</div>
+                          <Input type="number" className={`h-9 ${cost == null ? "border-orange-400" : ""}`} placeholder="Purchase price"
+                                 value={shown} onChange={(e) => setCartLine(i, { cost: e.target.value === "" ? null : Number(e.target.value), costTouched: true })} />
+                        </div>
+                        <div className="text-right text-[11px] leading-tight pb-1">
+                          {cost == null ? (
+                            <span className="text-orange-600">Enter the cost to see the profit</span>
+                          ) : (
+                            <>
+                              <span className="text-muted-foreground">Profit </span>
+                              <b className={l.qty * (Number(l.price) - cost) >= 0 ? "text-green-600" : "text-destructive"}>{money(l.qty * (Number(l.price) - cost))}</b>
+                            </>
+                          )}
+                          {l.costTouched && cost != null && saved == null && (
+                            <div className="text-muted-foreground mt-0.5">Saved as the product's cost with this sale</div>
+                          )}
+                          {l.costTouched && cost != null && saved != null && Math.round(cost) !== Math.round(saved) && (
+                            <button type="button" onClick={() => saveAsProductCost(l)}
+                                    className="mt-0.5 text-primary underline-offset-2 hover:underline"
+                                    title={`Product cost is ${money(saved)} — make ${money(cost)} the new cost`}>
+                              Save {money(cost)} as product cost
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div className="mt-2 flex items-center justify-between">
                     <div className="text-[11px] text-muted-foreground">Line total</div>
                     <div className="text-sm font-bold">{money(l.qty * l.price)}</div>
@@ -385,6 +466,14 @@ function PosPage() {
           <div className="flex justify-between items-center text-lg font-black border-t pt-2">
             <span>Total</span><span>{money(total)}</span>
           </div>
+          {cart.length > 0 && (
+            <div className="flex justify-between items-center text-xs -mt-1">
+              <span className="text-muted-foreground">
+                Profit (internal){uncostedLines > 0 && <span className="text-orange-600"> · {uncostedLines} item{uncostedLines === 1 ? "" : "s"} without a cost not counted</span>}
+              </span>
+              <b className={billProfit >= 0 ? "text-green-600" : "text-destructive"}>{money(billProfit)}</b>
+            </div>
+          )}
 
           {/* Customer — optional for cash sales */}
           <details className="rounded-xl border p-3" open={!!clientId || !!customerName}>

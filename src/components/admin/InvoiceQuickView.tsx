@@ -7,6 +7,8 @@ import { toPaisa } from "@/lib/pricing";
 import { useCompany } from "@/lib/company";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
 import {
   Printer, Wrench, MapPin, Phone, Mail, Globe, CircleDot, BatteryCharging,
   Droplet, LifeBuoy, Car, Sparkles, UserRound, Landmark, Award, Lock,
@@ -52,6 +54,11 @@ export function InvoiceQuickView({
   const [client, setClient] = useState<any>(null);
   const [images, setImages] = useState<Record<string, string>>({});
   const [notFound, setNotFound] = useState(false);
+  // Each product's current cost (internal block) and costs being typed for
+  // lines saved without one; `refresh` refetches after a cost is saved.
+  const [productCosts, setProductCosts] = useState<Record<string, number>>({});
+  const [costDraft, setCostDraft] = useState<Record<string, string>>({});
+  const [refresh, setRefresh] = useState(0);
   const COMPANY = useCompany();
   // Latest callback without re-running the loader when the parent passes an
   // inline function.
@@ -96,13 +103,14 @@ export function InvoiceQuickView({
       // Product photos for the item rows (best effort — icon fallback).
       const pids = [...new Set(loaded.items.map((x: any) => x.product_id).filter(Boolean))] as string[];
       if (pids.length > 0) {
-        const { data: prods } = await supabase.from("products").select("id, image_url").in("id", pids);
+        const { data: prods } = await supabase.from("products").select("id, image_url, purchase_price").in("id", pids);
         if (cancelled) return;
         setImages(Object.fromEntries((prods ?? []).filter((p: any) => p.image_url).map((p: any) => [p.id, p.image_url])));
-      } else setImages({});
+        setProductCosts(Object.fromEntries((prods ?? []).map((p: any) => [p.id, Number(p.purchase_price) || 0])));
+      } else { setImages({}); setProductCosts({}); }
     })();
     return () => { cancelled = true; };
-  }, [invoiceId, invoiceRef, reloadKey]);
+  }, [invoiceId, invoiceRef, reloadKey, refresh]);
 
   const open = !!(invoiceId || invoiceRef);
   const billName = client?.name ?? inv?.customer_name;
@@ -115,9 +123,36 @@ export function InvoiceQuickView({
   // the complete position: previous balance + this bill = total outstanding.
   const accountTotal = client ? Number(client.current_balance) || 0 : 0;
   const previousBalance = client ? toPaisa(accountTotal - balance) : 0;
-  // Internal figures (never printed): what the goods cost, and the margin.
-  const costTotal = items.reduce((a, it) => a + (Number(it.cost_price) || 0) * (Number(it.quantity) || 0), 0);
-  const profit = inv ? toPaisa(Number(inv.total_amount) - costTotal) : 0;
+  // Internal figures (never printed): what the goods cost, and the margin —
+  // over the lines whose cost is known. A line without a cost is listed for
+  // the cost to be entered, never counted as all profit. Rs 1 stock-out lines
+  // (stock manage, claims) are not sales and stay out, as in the P&L.
+  const saleLines = items.filter((it) => Number(it.unit_price) > 1);
+  const costed = saleLines.filter((it) => Number(it.cost_price) > 0);
+  const uncosted = saleLines.filter((it) => !(Number(it.cost_price) > 0));
+  const lineTotal = (it: any) => Number(it.total_price) || (Number(it.unit_price) || 0) * (Number(it.quantity) || 0);
+  const costTotal = costed.reduce((a, it) => a + Number(it.cost_price) * (Number(it.quantity) || 0), 0);
+  const costedSales = costed.reduce((a, it) => a + lineTotal(it), 0);
+  const profit = toPaisa(costedSales - costTotal);
+
+  // Record the cost of a line saved without one. A product with no cost on
+  // record keeps it too, and its other sales without a cost take it as well
+  // (database), so their profit corrects itself.
+  const saveLineCost = async (it: any) => {
+    const cost = Number(costDraft[it.id]);
+    if (!(cost > 0)) return toast.error("Enter what one unit cost");
+    const { error } = await supabase.from("invoice_items").update({ cost_price: cost }).eq("id", it.id);
+    if (error) return toast.error(error.message);
+    if (it.product_id && !(productCosts[it.product_id] > 0)) {
+      const { error: pErr } = await supabase.from("products").update({ purchase_price: cost }).eq("id", it.product_id);
+      if (pErr) toast.error(`Cost saved on this invoice, but not on the product: ${pErr.message}`);
+      else toast.success(`${it.product_name}: cost ${money(cost)} saved — also on the product and its other sales without a cost`);
+    } else {
+      toast.success(`${it.product_name}: cost ${money(cost)} saved on this invoice`);
+    }
+    setCostDraft((d) => { const n = { ...d }; delete n[it.id]; return n; });
+    setRefresh((k) => k + 1);
+  };
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -370,20 +405,51 @@ export function InvoiceQuickView({
             )}
 
             {/* ============ Internal cost & profit — never printed ============ */}
-            {costTotal > 0 && (
+            {saleLines.length > 0 && (
               <div className="mx-5 mt-4 rounded-xl border border-gold/50 bg-amber-50 p-4 print:hidden">
                 <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-amber-700 mb-1.5">
                   <Lock className="h-3 w-3" /> Internal — hidden from customer
                 </div>
-                <div className="flex justify-between text-xs text-zinc-600">
+                {/* Line by line: sold at, cost each, profit. */}
+                <div className="space-y-1 mb-2">
+                  {saleLines.map((it) => {
+                    const qty = Number(it.quantity) || 0;
+                    const cost = Number(it.cost_price) > 0 ? Number(it.cost_price) : null;
+                    const lp = cost == null ? null : toPaisa(lineTotal(it) - cost * qty);
+                    return (
+                      <div key={it.id} className="text-xs text-zinc-600 flex items-center justify-between gap-2 flex-wrap">
+                        <span className="min-w-0 truncate">
+                          {it.product_name} × {qty} · sold {money(Number(it.unit_price) || 0)}
+                          {cost != null && <> · cost {money(cost)}</>}
+                        </span>
+                        {cost != null ? (
+                          <span className={`font-semibold ${lp! >= 0 ? "text-green-600" : "text-red-600"}`}>{money(lp!)}</span>
+                        ) : (
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-orange-600 font-semibold">No cost</span>
+                            <Input type="number" placeholder="Cost each" className="h-7 w-24 text-xs bg-white"
+                                   value={costDraft[it.id] ?? ""} onChange={(e) => setCostDraft((d) => ({ ...d, [it.id]: e.target.value }))} />
+                            <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => saveLineCost(it)}>Save</Button>
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between text-xs text-zinc-600 border-t border-amber-200 pt-1.5">
                   <span>Cost (purchase price)</span><span className="font-semibold text-zinc-900">{money(costTotal)}</span>
                 </div>
                 <div className="flex justify-between text-xs text-zinc-600 mt-0.5">
-                  <span>Profit</span>
+                  <span>Profit{uncosted.length > 0 ? " (items with a cost)" : ""}</span>
                   <span className={`font-bold ${profit >= 0 ? "text-green-600" : "text-red-600"}`}>
-                    {money(profit)}{Number(inv.total_amount) > 0 ? ` (${Math.round((profit / Number(inv.total_amount)) * 100)}%)` : ""}
+                    {money(profit)}{costedSales > 0 ? ` (${Math.round((profit / costedSales) * 100)}%)` : ""}
                   </span>
                 </div>
+                {uncosted.length > 0 && (
+                  <div className="text-[11px] text-orange-700 mt-1">
+                    {uncosted.length} item{uncosted.length === 1 ? " has" : "s have"} no cost recorded — enter what one unit cost above to include {uncosted.length === 1 ? "it" : "them"} in the profit.
+                  </div>
+                )}
               </div>
             )}
 
