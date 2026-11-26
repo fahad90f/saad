@@ -18,7 +18,9 @@ export const Route = createFileRoute("/_authenticated/admin/stock")({
   component: StockAdmin,
 });
 
-type PurchaseLine = { uid: string; product_id: string; quantity: number; unit_cost: number; base: number; pct: number };
+// `fromZero`: the product is below zero and the owner says those units were
+// on the shelf all along — the count is set to 0 before this purchase adds.
+type PurchaseLine = { uid: string; product_id: string; quantity: number; unit_cost: number; base: number; pct: number; fromZero?: boolean };
 
 /** Final price = base ± % (no % → final equals the base). Always defined. */
 const finalOf = (l: { base: number; pct: number; unit_cost: number }) =>
@@ -105,6 +107,16 @@ function StockAdmin() {
 
     setSaving(true);
     try {
+      // Lines whose product sits below zero and the owner ticked "count from
+      // 0": correct the count to 0 first (live figure, one statement each),
+      // so 10 bought shows 10 rather than 10 minus the old shortfall.
+      for (const pid of new Set(valid.filter((l) => l.fromZero).map((l) => l.product_id))) {
+        const { error: cErr } = await supabase.rpc("stock_set_count", {
+          _product: pid, _counted: 0, _reason: "Correction",
+          _note: "Units sold below zero were on the shelf — counted from 0 before a purchase",
+        });
+        if (cErr) return toast.error(`Could not correct the stock first: ${cErr.message}`);
+      }
       const ref = "PUR-" + Date.now();
       const { error } = await supabase.from("stock_purchases").insert(valid.map((l) => ({
         date, supplier_name: supplier, product_id: l.product_id,
@@ -262,6 +274,26 @@ function StockAdmin() {
                     {" · "}what you pay the merchant, not the shop price
                   </div>
                 </div>
+
+                {(() => {
+                  // What this purchase does to the stock, before it is saved.
+                  const prod = products.find((p) => p.id === l.product_id);
+                  if (!prod || prod.track_stock === false) return null;
+                  const now = Number(prod.quantity_in_stock) || 0;
+                  const qty = Number(l.quantity) || 0;
+                  const after = (l.fromZero && now < 0 ? 0 : now) + qty;
+                  return (
+                    <div className={`text-[11px] rounded-lg px-2.5 py-1.5 ${now < 0 && !l.fromZero ? "bg-orange-500/10 text-orange-700" : "bg-muted/50 text-muted-foreground"}`}>
+                      Stock now {now < 0 ? `${now} (${-now} sold below zero)` : now} → after this purchase <b>{after}</b>
+                      {now < 0 && (
+                        <label className="mt-1 flex items-start gap-1.5 cursor-pointer text-foreground">
+                          <input type="checkbox" className="mt-0.5" checked={!!l.fromZero} onChange={(e) => setLine(i, { fromZero: e.target.checked })} />
+                          <span>Those {-now} were on the shelf (the record was short) — count from 0, so this purchase shows {qty}. Leave unticked if they came from this purchase.</span>
+                        </label>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div className="grid grid-cols-3 gap-2">
                   <div className="space-y-1">

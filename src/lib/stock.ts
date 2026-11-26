@@ -23,9 +23,15 @@ export const inStock = (p: StockFields) => !isTracked(p) || stockOf(p) > 0;
 /** Units sold before their purchase was booked (tracked products only). */
 export const oversold = (p: StockFields) => (isTracked(p) && stockOf(p) < 0 ? -stockOf(p) : 0);
 
-/** Short label for lists: "7 left", "Out of stock" or "Not tracked". */
+/**
+ * Short label for lists: "7 left", "Out of stock", "Out of stock · 1 oversold"
+ * or "Not tracked". Units sold below zero are shown, never hidden as a plain
+ * 0: the next purchase fills them first (−1 + 10 bought = 9).
+ */
 export const stockLabel = (p: StockFields) =>
-  !isTracked(p) ? "Not tracked" : stockOf(p) > 0 ? `${stockOf(p)} left` : "Out of stock";
+  !isTracked(p) ? "Not tracked"
+    : stockOf(p) > 0 ? `${stockOf(p)} left`
+    : stockOf(p) < 0 ? `Out of stock · ${-stockOf(p)} oversold` : "Out of stock";
 
 /**
  * The one rule every browse list and picker follows: a stock-tracked product

@@ -109,18 +109,37 @@ export async function confirmStockForSale(lines: Array<{ product_id: string | nu
     window.alert(`Could not check stock before saving: ${error.message}`);
     return false;
   }
-  const shortfalls: string[] = [];
+  const short: Array<{ id: string; name: string; qty: number; stock: number }> = [];
   for (const p of data ?? []) {
     if (!isTracked(p)) continue; // services / trade-ins: always sellable, never checked
     const qty = wanted.get(p.id) ?? 0;
     const stock = Number(p.quantity_in_stock) || 0;
-    if (qty > stock) {
-      const oversold = stock < 0 ? ` (already ${-stock} oversold)` : "";
-      shortfalls.push(`${p.product_name}: only ${Math.max(0, stock)} in stock${oversold}, selling ${qty}.`);
-    }
+    if (qty > stock) short.push({ id: p.id, name: p.product_name ?? "Product", qty, stock });
   }
-  if (shortfalls.length === 0) return true;
+  if (short.length === 0) return true;
+  const detail = short.map((s) =>
+    `${s.name}: the record shows ${s.stock > 0 ? s.stock : 0}${s.stock < 0 ? ` (${-s.stock} already sold below zero)` : ""}, selling ${s.qty}.`).join("\n");
+
+  // Selling more than the record shows means one of two things, and they
+  // need opposite handling, so ask. (1) The units are on the shelf and the
+  // record was short: correct the count first, so this sale leaves the
+  // stock at 0 and the next purchase adds in full (10 bought shows 10, not
+  // 9). (2) The units came in on a purchase not booked yet: sell below
+  // zero; booking that purchase then brings the count right.
+  if (window.confirm(`${detail}\n\nAre they all in the shop right now?\n\nOK = yes — correct the stock count first, so after this sale it is 0 and the next purchase adds in full.\nCancel = no, or not sure.`)) {
+    for (const s of short) {
+      const { error: cErr } = await supabase.rpc("stock_set_count", {
+        _product: s.id, _counted: s.qty, _reason: "Physical count",
+        _note: `Corrected at sale: ${s.qty} on the shelf, record showed ${s.stock}`,
+      });
+      if (cErr) {
+        window.alert(`Could not correct the stock of ${s.name}: ${cErr.message}`);
+        return false;
+      }
+    }
+    return true;
+  }
   return window.confirm(
-    `${shortfalls.join("\n")}\n\nContinue? Stock will go below zero until the purchase is booked.`,
+    `Sell anyway, leaving the stock below zero?\n\nChoose this only if these units came in on a purchase that is not booked yet — booking it will bring the count right.\n\nOK = sell. Cancel = go back.`,
   );
 }
